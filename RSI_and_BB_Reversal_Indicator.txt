@@ -1,0 +1,171 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © hackerheaven73
+
+//@version=5
+indicator('UT Bot + Nadaraya-Watson Envelope with Hull Suite TSL + RSI Reversal Cross + BB Reversal',overlay = true,max_lines_count = 500,max_labels_count = 500,max_bars_back = 500)
+
+// Inputs
+src = input(close, title='Source')
+h = input.float(8.,'Bandwidth', minval = 0, group = 'Nadaraya-Watson Envelope')
+mult = input.float(3., minval = 0, group = 'Nadaraya-Watson Envelope')
+repaint = input(true, 'Repainting Smoothing', group = 'Nadaraya-Watson Envelope')
+upCss = input.color(color.rgb(4, 246, 222), 'Triangle & Envlop Colors', group = 'Nadaraya-Watson Envelope')
+dnCss = input.color(color.rgb(245, 5, 205), '', group = 'Nadaraya-Watson Envelope')
+
+modeSwitch = input.string('Hma', title='Hull Variation', options=['Hma', 'Thma', 'Ehma'],group="Hull Suite")
+length = input(55, title='Length',group="Hull Suite")
+lengthMult = input(1.0, title='Length multiplier',group="Hull Suite")
+htf = input.timeframe('240', title='Higher timeframe',group="Hull Suite")
+thicknesSwitch = input(1, title='Line Thickness',group="Hull Suite")
+transpSwitch = input.int(40, title='Band Transparency', step=5,group="Hull Suite")
+useHtf = input(false, title='Show Hull MA from X timeframe?',group="Hull Suite")
+candleCol = input(false, title='Color candles based on Hull\'s Trend?',group="Hull Suite")
+switchColor = input(true, 'Color Hull according to trend?',group="Hull Suite")
+visualSwitch = input(true, title='Show as a Band?',group="Hull Suite")
+
+keyvalue = input.float(3, title='Factor',step=.5,group="TSL")
+atrperiod = input(10,title='ATR Length',group="TSL")
+
+rsiOB = input(65, title='RSI OverBought Value', group="RSI Reversal")
+rsiOS = input(35, title='RSI OverSold Value', group="RSI Reversal")
+
+lengthx = input.int(20, title="BBands Length", minval=1, group="Bollinger Bands Reversal")
+multx = input.float(2, title="BBands Multiplier", minval=0.001, maxval=50,group="Bollinger Bands Reversal")
+
+// Hull Suite functions
+HMA(_src,_length)=>ta.wma(2*ta.wma(_src,_length/2)-ta.wma(_src,_length),math.round(math.sqrt(_length)))
+EHMA(_src,_length)=>ta.ema(2*ta.ema(_src,_length/2)-ta.ema(_src,_length),math.round(math.sqrt(_length)))
+THMA(_src,_length)=>ta.wma(ta.wma(_src,_length/3)*3-ta.wma(_src,_length/2)-ta.wma(_src,_length),_length)
+Mode(m, s, l)=>m=='Hma'?HMA(s,l):m=='Ehma'?EHMA(s,l):m=='Thma'?THMA(s,l/2):na
+
+// Hull calculation
+_hull = Mode(modeSwitch, src, int(length * lengthMult))
+HULL = useHtf ? request.security(syminfo.tickerid, htf, _hull) : _hull
+MHULL = HULL[0]
+SHULL = HULL[2]
+hullColor = switchColor ? (HULL > HULL[2] ? color.lime : color.red) : color.orange
+Fi1 = plot(MHULL, title='MHULL', color=hullColor, linewidth=thicknesSwitch)
+Fi2 = plot(visualSwitch ? SHULL : na, title='SHULL', color=hullColor, linewidth=thicknesSwitch)
+fill(Fi1, Fi2, title='Band Filler', color=color.new(hullColor, transpSwitch))
+
+// TSL
+xATR = ta.atr(atrperiod)
+nLoss = keyvalue * xATR
+var float xATRTrailingStop = na
+iff_1 = src > nz(xATRTrailingStop[1], 0) ? src - nLoss : src + nLoss
+iff_2 = src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0) ? math.min(nz(xATRTrailingStop[1]), src + nLoss) : iff_1
+xATRTrailingStop := src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0) ? math.max(nz(xATRTrailingStop[1]), src - nLoss) : iff_2
+var int pos = 0
+iff_3 = src[1] > nz(xATRTrailingStop[1], 0) and src < nz(xATRTrailingStop[1], 0) ? -1 : nz(pos[1], 0)
+pos := src[1] < nz(xATRTrailingStop[1], 0) and src > nz(xATRTrailingStop[1], 0) ? 1 : iff_3
+xcolor = pos == -1 ? color.red : pos == 1 ? color.lime : color.blue
+plot(xATRTrailingStop, color=xcolor, title='Trailing Stop',linewidth=2)
+buy = ta.crossover(src, xATRTrailingStop)
+sell = ta.crossunder(src, xATRTrailingStop)
+plotshape(buy, title='Buy', text='Buy', style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+plotshape(sell, title='Sell', text='Sell', style=shape.labeldown, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+barcolor(src > xATRTrailingStop ? color.rgb(9, 250, 210) : color.rgb(247, 7, 203))
+
+// Nadaraya-Watson
+// Nadaraya-Watson Envelope
+gauss(x, h) => math.exp(-(math.pow(x, 2) / (h * h * 2)))
+
+n = bar_index
+
+// Prepare line array for repainting mode
+var ln = array.new_line(0)
+if barstate.isfirst and repaint
+    for i = 0 to 499
+        array.push(ln, line.new(na, na, na, na))
+
+// Precompute Gaussian weights (non-repainting)
+var coefs = array.new_float(0)
+var float den = 0.0
+if barstate.isfirst and not repaint
+    for i = 0 to 499
+        w = gauss(i, h)
+        array.push(coefs, w)
+        den := array.sum(coefs)
+
+// Compute non-repainting smoothed output
+float out = 0.0
+if not repaint
+    for i = 0 to 499
+        out += src[i] * array.get(coefs, i)
+    out /= den
+
+// Envelope boundaries
+mae   = ta.sma(math.abs(src - out), 499) * mult
+upper = out + mae
+lower = out - mae
+
+float y2 = na
+float y1 = na
+var nwe = array.new_float(0)
+
+// Repainting smoothing version
+if barstate.islast and repaint
+    sae = 0.0
+    limit = math.min(499, n - 1)
+
+    // Compute Nadaraya-Watson values
+    for i = 0 to limit
+        sum = 0.0
+        sumw = 0.0
+        for j = 0 to limit
+            w = gauss(i - j, h)
+            sum += src[j] * w
+            sumw += w
+        y2 := sum / sumw
+        sae += math.abs(src[i] - y2)
+        array.push(nwe, y2)
+
+    sae := sae / limit * mult
+                                                    
+    // Draw lines and reversal labels
+    for i = 0 to limit
+        if (i % 2 == 1)
+            line.new(n - i + 1, y1 + sae, n - i, array.get(nwe, i) + sae, color = upCss, width = 2)
+            line.new(n - i + 1, y1 - sae, n - i, array.get(nwe, i) - sae, color = dnCss, width = 2)
+
+        if src[i] > array.get(nwe, i) + sae and src[i + 1] < array.get(nwe, i) + sae
+            label.new(n - i, src[i], '?', color = color.new(color.white, 100), style = label.style_label_down, textcolor = dnCss)
+
+        if src[i] < array.get(nwe, i) - sae and src[i + 1] > array.get(nwe, i) - sae
+            label.new(n - i, src[i], '?', color = color.new(color.white, 100), style = label.style_label_up, textcolor = upCss)
+   
+        y1 := array.get(nwe, i)
+
+// Show repainting info
+var tb = table.new(position.top_right, 1, 1, bgcolor = #1e222d, border_color = #373a46, border_width = 1, frame_color = #373a46, frame_width = 1)
+if repaint
+    table.cell(tb, 0, 0, 'Repainting Mode Enabled', text_color = color.white, text_size = size.small)
+
+// Plot final envelopes (non-repainting)
+plot(repaint ? na : upper, 'Upper', upCss, linewidth = 2)
+plot(repaint ? na : lower, 'Lower', dnCss, linewidth = 2)
+
+// Crossover/crossunder markers
+plotshape(ta.crossunder(close, lower) ? low : na, "Crossunder", shape.labelup, location.absolute, color = color.new(color.white, 100), text = '?', textcolor = upCss, size = size.tiny)
+plotshape(ta.crossover(close, upper) ? high : na, "Crossover", shape.labeldown, location.absolute, color = color.new(color.white, 100), text = '?', textcolor = dnCss, size = size.tiny)
+
+// RSI reversal
+lastCandleSize = math.abs(high[1] - low[1])         
+curCandleSize = math.abs(high - low)
+bullishCandle = curCandleSize > lastCandleSize * 1.5 and close > open
+bearishCandle = curCandleSize > lastCandleSize * 1.5 and close < open
+rsiValue = ta.rsi(close[1], 14)
+plotshape(bullishCandle and (rsiValue[1] < rsiOS or rsiValue < rsiOS), title="RSI cross Up reversal", color=color.green, style=shape.xcross, size=size.small, location=location.belowbar)
+plotshape(bearishCandle and (rsiValue[1] > rsiOB or rsiValue > rsiOB), title="RSI cross Down reversal", color=color.red, style=shape.xcross, size=size.small, location=location.abovebar)
+
+
+// BB reversal
+basisx = ta.sma(close, lengthx)
+devx = multx * ta.stdev(close, lengthx)
+upperx = basisx + devx
+lowerx = basisx - devx
+BRCU = low[2]<lowerx[2] and close[2]<open[2] and close[1]>lowerx[1] and close[1]>open[1] and close>high[1]
+BRCD = high[2]>upperx[2] and close[2]>open[2] and close[1]<upperx[1] and close[1]<open[1] and close<low[1]
+plotshape(BRCU, title="BB circle Up reversal", color=color.green, style=shape.circle, size=size.small, location=location.belowbar)
+plotshape(BRCD, title="BB circle Down reversal", color=color.red, style=shape.circle, size=size.small, location=location.abovebar)
+                                                                                                                                                                                                                                                        
